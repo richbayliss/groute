@@ -1,4 +1,3 @@
 node_modules/
-*.key
-*.pub
+keys/
 nodemon.json

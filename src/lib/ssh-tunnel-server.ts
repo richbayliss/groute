@@ -3,9 +3,9 @@ import * as ssh2 from "ssh2";
 import { ParsedKey } from "ssh2-streams";
 import { isArray } from "util";
 import { EventEmitter } from "events";
-import { Writable, Pipe, Transform, Readable } from "stream";
+import { Writable, Readable } from "stream";
 import uuidv4 = require("uuid/v4");
-import { Socket } from "net";
+import { BlessedUI } from "./interface";
 
 export type AuthProviderDelegate = (ctx: {
   sessionId: string;
@@ -13,11 +13,15 @@ export type AuthProviderDelegate = (ctx: {
   password: string;
 }) => boolean;
 
-type SocketConnectionEventDelegate = (socket: net.Socket) => void;
-
 type SshSessionState = {
   client: ssh2.Connection;
   bindings: { address: string; port: number }[];
+};
+
+export type BidirectionalStream = Readable & Writable;
+export type Shell = ssh2.ServerChannel & {
+  columns?: number;
+  rows?: number;
 };
 
 export declare interface SshTunnelServer {
@@ -29,13 +33,22 @@ export declare interface SshTunnelServer {
   on(event: "connect", listener: (sessionId: string) => void): this;
   on(event: "disconnect", listener: (sessionId: string) => void): this;
   on(
-    event: "tunnel",
+    event: "open-tunnel",
     listener: (
-      sessionId: string,
-      context: {
+      info: {
+        sessionId: string;
         port: number;
         address: string;
-      }
+      },
+      accept: (port: number) => void,
+      onIncoming: (
+        stream: BidirectionalStream,
+        info: {
+          port: number;
+          address: string;
+        }
+      ) => Promise<BidirectionalStream>,
+      log: (message: string, gateway: string) => void
     ) => void
   ): this;
 
@@ -44,12 +57,21 @@ export declare interface SshTunnelServer {
   emit(event: "connect", sessionId: string): boolean;
   emit(event: "disconnect", sessionId: string): boolean;
   emit(
-    event: "tunnel",
-    sessionId: string,
-    tunnel: {
+    event: "open-tunnel",
+    info: {
+      sessionId: string;
       port: number;
       address: string;
-    }
+    },
+    accept: (port: number) => void,
+    onIncoming: (
+      stream: BidirectionalStream,
+      info: {
+        port: number;
+        address: string;
+      }
+    ) => Promise<BidirectionalStream>,
+    log: (message: string, gateway: string) => void
   ): boolean;
 }
 
@@ -89,19 +111,6 @@ export class SshTunnelServer extends EventEmitter {
     return this;
   };
 
-  createTcpListeningSocket = (onConnected: SocketConnectionEventDelegate) => {
-    return net.createServer(incommingSocket => {
-      if (
-        incommingSocket.remoteAddress === undefined ||
-        incommingSocket.remotePort === undefined
-      ) {
-        return incommingSocket.end();
-      }
-
-      onConnected(incommingSocket);
-    });
-  };
-
   clientConnectionListener = (
     client: ssh2.Connection,
     info: ssh2.ClientInfo
@@ -112,6 +121,7 @@ export class SshTunnelServer extends EventEmitter {
     client.on("authentication", ctx => {
       switch (ctx.method) {
         case "publickey":
+        case "keyboard-interactive":
           break;
         default:
           return ctx.reject();
@@ -125,44 +135,95 @@ export class SshTunnelServer extends EventEmitter {
     client.on("ready", () => {
       this.emit("connect", sessionId);
 
+      let shell: Shell;
+      let ui: BlessedUI;
+
       client
         .on("end", () => this.emit("disconnect", sessionId))
-        .on("session", (accept, reject) => {
-          let session = accept();
+        .on("session", accept => {
+          let rows = 24;
+          let columns = 80;
 
-          session.on("pty", accept => accept()).on("shell", accept => accept());
+          accept()
+            .on("pty", (accept, _reject, info) => {
+              rows = info.rows || rows;
+              columns = info.cols || columns;
+              accept();
+            })
+            .on("shell", accept => {
+              shell = accept();
+              shell.rows = rows;
+              shell.columns = columns;
+
+              ui = new BlessedUI(shell);
+              ui.onQuit(() => {
+                shell.exit(0);
+                shell.end();
+                // client.end();
+              });
+              ui.log("Tunnel started...");
+            })
+            .on("window-change", (accept, reject, info) => {
+              rows = info.rows;
+              columns = info.cols;
+              if (shell) {
+                shell.rows = rows;
+                shell.columns = columns;
+                shell.emit("resize");
+              }
+            });
         })
         .on("request", (accept, reject, name, info) => {
-          if (name === "tcpip-forward") {
-            accept();
-
-            const binding = {
-              address: info.bindAddr,
-              port: info.bindPort
-            };
-            sessionState.bindings.push(binding);
-            this.sessions.set(sessionId, sessionState);
-
-            this.emit("tunnel", sessionId, binding);
-          } else {
-            reject();
+          if (name !== "tcpip-forward") {
+            return reject();
           }
+
+          const tunnelInfo = {
+            sessionId,
+            address: info.bindAddr,
+            port: info.bindPort
+          };
+
+          this.emit(
+            "open-tunnel",
+            tunnelInfo,
+            accept,
+            async (serverStream, info) => {
+              const clientStream = await this.openStream(
+                client,
+                info,
+                tunnelInfo
+              );
+
+              clientStream.on("end", () => serverStream.end());
+              serverStream.on("end", () => clientStream.end());
+              clientStream.pipe(
+                serverStream,
+                { end: false }
+              );
+              serverStream.pipe(
+                clientStream,
+                { end: false }
+              );
+
+              return clientStream;
+            },
+            (message: string, gateway: string) => {
+              ui.log(`${gateway}: ${message}`);
+            }
+          );
+          accept();
         });
     });
   };
 
   openStream = (
-    sessionId: string,
+    connection: ssh2.Connection,
     local: { address: string; port: number },
     remote: { address: string; port: number }
   ): Promise<Readable & Writable> => {
-    const state = this.sessions.get(sessionId);
-    if (state === undefined) {
-      throw new Error(`No connection for session ${sessionId} could be found`);
-    }
-
     return new Promise((resolve, reject) => {
-      state.client.forwardOut(
+      connection.forwardOut(
         local.address,
         local.port,
         remote.address,

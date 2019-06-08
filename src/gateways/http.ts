@@ -1,13 +1,12 @@
+import * as _ from "lodash";
+import { Socket, createServer, Server } from "net";
+
+import { Gateway, Endpoint } from "./index";
+import { HTTP_PORT } from "../lib/config";
 import { logger } from "../lib/logger";
 
-import { Gateway, TunnelProvider } from "./index";
-import { Socket, createServer, Server } from "net";
-import { HTTP_PORT } from "../lib/config";
-
 export class HttpGateway extends Gateway {
-  sessions: Map<string, string> = new Map();
-  tunnelProvider: TunnelProvider | undefined;
-
+  endpoints: Map<string, Endpoint> = new Map();
   httpServer: Server;
 
   constructor() {
@@ -17,23 +16,16 @@ export class HttpGateway extends Gateway {
 
   start = () => {
     this.httpServer.listen(HTTP_PORT, "0.0.0.0", () =>
-      logger.info(`HTTP Gateway listening on port ${HTTP_PORT}`)
+      logger.info(`HTTP listening on 0.0.0.0:${HTTP_PORT}`)
     );
 
     return this;
   };
 
-  registerSession = (
-    sessionId: string,
-    local: { address: string; port: number }
-  ): void => {
-    this.sessions.set(local.address, sessionId);
-  };
-
-  setTunnelProvider(provider: TunnelProvider): this {
-    this.tunnelProvider = provider;
+  registerEndpoint = (endpoint: Endpoint): this => {
+    this.endpoints.set(endpoint.local.address, endpoint);
     return this;
-  }
+  };
 
   parseRequest = (client: Socket) => {
     logger.debug(`HTTP connection from ${client.remoteAddress}`);
@@ -51,60 +43,53 @@ export class HttpGateway extends Gateway {
         return;
       }
 
-      const [_header, host] = matches;
+      const [, host] = matches;
 
       if (host == null) {
         logger.debug("Unable to determine the HTTP Host header value");
+        client.write("HTTP/1.1 404 Not Found\r\n\r\n");
+        client.end();
         return;
       }
 
-      logger.debug(`Routing HTTP request for ${host}`);
+      logger.debug(`HTTP request for ${host}`);
 
       // we have a host...
       client.removeListener("on", cacheRequest);
 
-      this.getTunnelForHost(host)
-        .then(({ tunnel }) => {
-          tunnel.pipe(client).pipe(tunnel);
-          tunnel.write(headers);
+      const endpoint = this.endpoints.get(host);
 
-          client.on("end", () => tunnel.end());
-        })
-        .catch((err: Error) => {
-          client.write("HTTP 404 NotFound\r\n");
-          client.end();
-        });
+      if (!endpoint) {
+        logger.debug(`Not able to find an endpoint for host: ${host}`);
+        client.write("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+        client.end();
+        return;
+      }
+
+      const [context, ...request_headers] = headers.split("\r\n");
+      const [method, path, version] = context.split(" ");
+
+      endpoint.onIncoming(client).then(server => {
+        server.write(headers);
+
+        endpoint.log(
+          `${client.remoteAddress}:${client.remotePort} -> ${
+            endpoint.local.address
+          }:${endpoint.local.port} -> ${method} ${path}`
+        );
+      });
     };
 
     client.on("error", err => logger.debug(err.message));
     client.on("data", cacheRequest);
   };
 
-  getTunnelForHost = (host: string) => {
-    const sessionId = this.sessions.get(host);
-
-    return new Promise((resolve, reject) => {
-      if (sessionId === undefined) {
-        reject(new Error("No session could be found for this host"));
+  unregisterEndpoint = (sessionId: string) => {
+    this.endpoints.forEach((v, k) => {
+      if (v.sessionId === sessionId) {
+        this.endpoints.delete(k);
       }
-
-      resolve();
-    }).then(() => {
-      if (this.tunnelProvider === undefined) {
-        throw new Error("No tunnel provider available to route the request");
-      }
-
-      return this.tunnelProvider(
-        sessionId as string,
-        {
-          address: host,
-          port: 80
-        },
-        {
-          address: "",
-          port: 0
-        }
-      );
     });
+    return this;
   };
 }
