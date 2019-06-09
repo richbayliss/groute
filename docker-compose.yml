@@ -1,0 +1,14 @@
+version: "2.1"
+
+volumes:
+  groute-keys: {}
+
+services:
+  groute:
+    build: .
+    restart: always
+    ports:
+      - "22:22"
+      - "80:80"
+    volumes:
+      - "groute-keys:/app/keys"

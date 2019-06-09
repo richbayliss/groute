@@ -12,6 +12,10 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@types/blessed": "^0.1.11",
+    "@types/lodash": "^4.14.134",
+    "blessed": "^0.1.81",
+    "lodash": "^4.17.11",
     "ssh2": "^0.8.0",
     "uuid": "^3.3.2",
     "winston": "^3.2.1"

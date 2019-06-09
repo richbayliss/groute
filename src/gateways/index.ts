@@ -1,22 +1,16 @@
-import { EventEmitter } from "events";
-import { Stream, Writable, Pipe, Readable } from "stream";
-import { Socket } from "net";
+import { BidirectionalStream } from "../lib/ssh-tunnel-server";
 
-export type TunnelProvider = (
-  sessionId: string,
-  local: { address: string; port: number },
-  remote: { address: string; port: number }
-) => Promise<{
-  tunnel: Readable & Writable;
-}>;
+export type Endpoint = {
+  sessionId: string;
+  local: { address: string; port: number };
+  log: (message: string) => void;
+  onIncoming: (request: BidirectionalStream) => Promise<BidirectionalStream>;
+};
 
 export abstract class Gateway {
   abstract start(): this;
-  abstract registerSession(
-    sessionId: string,
-    local: { address: string; port: number }
-  ): void;
-  abstract setTunnelProvider(provider: TunnelProvider): this;
+  abstract registerEndpoint(endpoint: Endpoint): this;
+  abstract unregisterEndpoint(sessionId: string): this;
 }
 
 export { HttpGateway } from "./http";
