@@ -1,10 +1,11 @@
 import * as fs from "fs";
 import * as ssh from "./lib/ssh-tunnel-server";
-import { HttpGateway } from "./gateways";
+import { HttpGateway, TcpGateway } from "./gateways";
 import { logger } from "./lib/logger";
 import { SSH_PORT, HTTP_PORT } from "./lib/config";
 
 const httpGateway = new HttpGateway().start();
+const tcpGateway = new TcpGateway().start();
 
 const sshServer = new ssh.SshTunnelServer({
   hostKey: fs.readFileSync("./keys/host.key"),
@@ -23,28 +24,42 @@ const sshServer = new ssh.SshTunnelServer({
   .on("disconnect", sessionId => {
     logger.debug(`Client for ${sessionId} disconnected`);
     httpGateway.unregisterEndpoint(sessionId);
+    tcpGateway.unregisterEndpoint(sessionId);
   })
   .listen(SSH_PORT);
 
 sshServer.on(
   "open-tunnel",
-  ({ sessionId, address, port }, accept, onIncoming, log) => {
+  ({ sessionId, address, port }, accept, onIncomingFn, log) => {
     logger.debug(`Tunnel binding for ${sessionId}: ${address}:${port}`);
+    let listeningPort = port;
+    const onListening = (port: number) => accept(port);
+
+    const onIncoming = (request: ssh.BidirectionalStream) => {
+      return onIncomingFn(request, { port: listeningPort, address });
+    };
 
     switch (port) {
       case 80:
         httpGateway.registerEndpoint({
           sessionId,
           local: { address, port },
-          onIncoming: (request: ssh.BidirectionalStream) => {
-            return onIncoming(request, { port, address });
-          },
+          onIncoming,
+          onListening,
           log: message => log(message, "HTTP")
         });
-        accept(HTTP_PORT);
         logger.debug(
           `Tunnel registered as HTTP for ${sessionId} http://${address}`
         );
+        break;
+      default:
+        tcpGateway.registerEndpoint({
+          sessionId,
+          local: { address, port },
+          onIncoming,
+          onListening,
+          log: message => log(message, "TCP")
+        });
         break;
     }
   }

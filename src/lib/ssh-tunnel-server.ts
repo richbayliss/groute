@@ -6,6 +6,7 @@ import { EventEmitter } from "events";
 import { Writable, Readable } from "stream";
 import uuidv4 = require("uuid/v4");
 import { BlessedUI } from "./interface";
+import { logger } from "./logger";
 
 export type AuthProviderDelegate = (ctx: {
   sessionId: string;
@@ -137,6 +138,7 @@ export class SshTunnelServer extends EventEmitter {
 
       let shell: Shell;
       let ui: BlessedUI;
+      const logs: string[] = [];
 
       client
         .on("end", () => this.emit("disconnect", sessionId))
@@ -159,9 +161,9 @@ export class SshTunnelServer extends EventEmitter {
               ui.onQuit(() => {
                 shell.exit(0);
                 shell.end();
-                // client.end();
               });
               ui.log("Tunnel started...");
+              logs.forEach(message => ui.log(message));
             })
             .on("window-change", (accept, reject, info) => {
               rows = info.rows;
@@ -178,56 +180,50 @@ export class SshTunnelServer extends EventEmitter {
             return reject();
           }
 
-          const tunnelInfo = {
+          const serverBind = {
             sessionId,
             address: info.bindAddr,
             port: info.bindPort
           };
 
+          const log = (message: string, gateway: string) => {
+            if (ui) {
+              ui.log(`${gateway}: ${message}`);
+            } else {
+              logs.push(`${gateway}: ${message}`);
+            }
+          };
+
           this.emit(
             "open-tunnel",
-            tunnelInfo,
+            serverBind,
             accept,
-            async (serverStream, info) => {
-              const clientStream = await this.openStream(
-                client,
-                info,
-                tunnelInfo
-              );
+            async serverStream => {
+              const clientStream = await this.openStream(client, serverBind);
 
               clientStream.on("end", () => serverStream.end());
               serverStream.on("end", () => clientStream.end());
-              clientStream.pipe(
-                serverStream,
-                { end: false }
-              );
-              serverStream.pipe(
-                clientStream,
-                { end: false }
-              );
+              clientStream.pipe(serverStream, { end: false });
+              serverStream.pipe(clientStream, { end: false });
 
               return clientStream;
             },
-            (message: string, gateway: string) => {
-              ui.log(`${gateway}: ${message}`);
-            }
+            log
           );
-          accept();
         });
     });
   };
 
   openStream = (
     connection: ssh2.Connection,
-    local: { address: string; port: number },
-    remote: { address: string; port: number }
+    local: { address: string; port: number }
   ): Promise<Readable & Writable> => {
     return new Promise((resolve, reject) => {
       connection.forwardOut(
         local.address,
         local.port,
-        remote.address,
-        remote.port,
+        "localhost",
+        0,
         (err, upstream) => {
           if (err) {
             this.emit(
@@ -236,7 +232,6 @@ export class SshTunnelServer extends EventEmitter {
             );
             reject(err);
           }
-
           resolve(upstream);
         }
       );

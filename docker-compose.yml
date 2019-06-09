@@ -10,5 +10,7 @@ services:
     ports:
       - "22:22"
       - "80:80"
+      - "443:443"
+      - "10000-20000:10000-20000"
     volumes:
       - "groute-keys:/app/keys"

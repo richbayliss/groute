@@ -1,5 +1,5 @@
 import * as _ from "lodash";
-import { Socket, createServer, Server } from "net";
+import { Socket, createServer, Server, AddressInfo } from "net";
 
 import { Gateway, Endpoint } from "./index";
 import { HTTP_PORT } from "../lib/config";
@@ -24,6 +24,8 @@ export class HttpGateway extends Gateway {
 
   registerEndpoint = (endpoint: Endpoint): this => {
     this.endpoints.set(endpoint.local.address, endpoint);
+    endpoint.onListening(HTTP_PORT);
+    endpoint.log(`Listening on ${endpoint.local.address}:${HTTP_PORT}`);
     return this;
   };
 
@@ -73,9 +75,7 @@ export class HttpGateway extends Gateway {
         server.write(headers);
 
         endpoint.log(
-          `${client.remoteAddress}:${client.remotePort} -> ${
-            endpoint.local.address
-          }:${endpoint.local.port} -> ${method} ${path}`
+          `${client.remoteAddress}:${client.remotePort} -> ${endpoint.local.address}:${endpoint.local.port} -> ${method} ${path}`
         );
       });
     };

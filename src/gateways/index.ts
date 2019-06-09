@@ -5,6 +5,7 @@ export type Endpoint = {
   local: { address: string; port: number };
   log: (message: string) => void;
   onIncoming: (request: BidirectionalStream) => Promise<BidirectionalStream>;
+  onListening: (port: number) => void;
 };
 
 export abstract class Gateway {
@@ -14,3 +15,4 @@ export abstract class Gateway {
 }
 
 export { HttpGateway } from "./http";
+export { TcpGateway } from "./tcp";
